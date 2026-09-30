@@ -193,21 +193,37 @@ class SyncEngine:
             proxy = self.proxy or os.getenv("SIDECAR_AUDIO_PROXY", "").strip()
             if proxy:
                 kwargs["proxy"] = proxy
-        try:
-            async with httpx.AsyncClient(**kwargs) as client:
-                response = await client.get(url, headers=headers)
-        except httpx.HTTPError as exc:
-            raise RuntimeError(f"media fetch failed: {exc}") from exc
-        if response.status_code in (301, 302, 307, 308):
-            location = response.headers.get("location", "")
-            if not await resolves_publicly(urljoin(url, location)):
-                raise ValueError("media redirect is not public HTTPS")
-            return await self._get(urljoin(url, location), headers)
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise RuntimeError(f"audio segment fetch failed: HTTP {exc.response.status_code}") from exc
-        return response
+
+        last_exc = None
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(**kwargs) as client:
+                    response = await client.get(url, headers=headers)
+                if response.status_code in (301, 302, 307, 308):
+                    location = response.headers.get("location", "")
+                    if not await resolves_publicly(urljoin(url, location)):
+                        raise ValueError("media redirect is not public HTTPS")
+                    return await self._get(urljoin(url, location), headers)
+                if response.status_code in (500, 502, 503, 504, 520, 521, 522, 524) and attempt == 0:
+                    await asyncio.sleep(0.5)
+                    continue
+                response.raise_for_status()
+                return response
+            except httpx.HTTPStatusError as exc:
+                last_exc = RuntimeError(f"audio segment fetch failed: HTTP {exc.response.status_code}")
+                if exc.response.status_code in (500, 502, 503, 504, 520, 521, 522, 524) and attempt == 0:
+                    await asyncio.sleep(0.5)
+                    continue
+                raise last_exc from exc
+            except (httpx.HTTPError, OSError) as exc:
+                last_exc = RuntimeError(f"media fetch failed: {exc}")
+                if attempt == 0:
+                    await asyncio.sleep(0.5)
+                    continue
+                raise last_exc from exc
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("media fetch failed: unknown error")
 
     @staticmethod
     def _playlist(text: str, master_url: str):
@@ -695,6 +711,7 @@ class SyncEngine:
         lookup_status = str(
             (lookup.get("status") if isinstance(lookup, dict) else "")
             or (lookup_details.get("status") if isinstance(lookup_details, dict) else "")
+            or ("ok" if (isinstance(lookup, dict) and (lookup.get("offset") is not None or lookup_details.get("offset") is not None)) else "")
         ).strip().lower()
 
         retry_old_vidfast = (
@@ -703,7 +720,7 @@ class SyncEngine:
             and (lookup_details.get("sync_algorithm") if isinstance(lookup_details, dict) else "")
             != self.SYNC_ALGORITHM
         )
-        if lookup and not retry_old_vidfast:
+        if lookup and not retry_old_vidfast and lookup_status not in ("incompatible", "sync_in_progress"):
             result = {"status": "ok", "cached": True, **(lookup.get("details") or lookup)}
             if reference_audio_url and not result.get("video_start_time"):
                 lookup = None
@@ -808,6 +825,7 @@ class SyncEngine:
             # Step 2: Center verification (50% duration)
             center_verified = False
             center_lag = 0.0
+            center_error = False
             if anchor_found:
                 center_pos = 0.50 * common
                 expected_center_lag = best_anchor_lag + (best_k - 1.0) * (center_pos - anchor_pos)
@@ -833,12 +851,14 @@ class SyncEngine:
                             center_lag = c_lag_rel
                             center_verified = True
                 except Exception as ex:
+                    center_error = True
                     print(f"[sidecar sync] Center verification warning: {ex}")
 
         # ------------------------------------------------------------------
         # VALUTAZIONE FINALE: SUCCESSO RAPIDO O BACKGROUND APPROFONDITO
         # ------------------------------------------------------------------
-        if anchor_found and (center_verified or getattr(self, "_is_mocked", False) or self._lag != SyncEngine._lag):
+        use_anchor_fallback = bool(anchor_found and best_anchor_corr >= 0.85 and center_error)
+        if anchor_found and (center_verified or use_anchor_fallback or getattr(self, "_is_mocked", False) or self._lag != SyncEngine._lag):
             med_lag = 0.5 * (best_anchor_lag + center_lag) if center_verified else best_anchor_lag
             final_offset = round(-med_lag + video_start_time, 3)
             result = {
@@ -858,7 +878,7 @@ class SyncEngine:
             }
             if self.offsets and hasattr(self.offsets, "report"):
                 await self.offsets.report(payload, result)
-            print(f"[sidecar sync] FastPass v2 OK: offset={final_offset}s, rate={result['rate']}, dev={result['deviation']}s")
+            print(f"[sidecar sync] FastPass v2 OK: offset={final_offset}s, rate={result['rate']}, dev={result['deviation']}s (anchor_fallback={use_anchor_fallback})")
             return result
 
         # Se la stima iniziale non concorda o è incerta: avvia ricerca approfondita in background!
@@ -874,7 +894,7 @@ class SyncEngine:
         )
 
         return {
-            "status": "incompatible",
+            "status": "sync_in_progress",
             "background_sync": True,
             "code": "SYNC_IN_PROGRESS",
             "message": "⚠️ Sincronizzazione approfondita in corso in background. Riprova tra 15-20 secondi.",

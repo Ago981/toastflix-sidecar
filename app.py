@@ -751,7 +751,7 @@ async def sync_audio(request: Request):
                 content={"status": "audio_fetch_failed", "error": err_msg}
             )
         raise HTTPException(status_code=422, detail=str(exc))
-    if result.get("status") == "in_progress":
+    if result.get("status") in ("in_progress", "sync_in_progress") or result.get("background_sync"):
         raise HTTPException(
             status_code=409,
             detail={
