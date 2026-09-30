@@ -1,3 +1,4 @@
 fastapi
 httpx[socks]
 uvicorn
+numpy

@@ -751,6 +751,14 @@ async def sync_audio(request: Request):
                 content={"status": "audio_fetch_failed", "error": err_msg}
             )
         raise HTTPException(status_code=422, detail=str(exc))
+    if result.get("status") == "in_progress":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SYNC_IN_PROGRESS",
+                "message": result.get("message") or "⚠️ Sincronizzazione approfondita in corso in background. Riprova tra 15-20 secondi.",
+            },
+        )
     await offsets.report(body, result)
     if result.get("status") != "ok":
         raise HTTPException(

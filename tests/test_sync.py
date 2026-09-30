@@ -240,6 +240,30 @@ class SyncPlaylistTests(unittest.IsolatedAsyncioTestCase):
             self.assertLess(command.index("-i"), command.index("-ss"))
             self.assertIn("-vn", command)
 
+    def test_fastpass_v2_fft_precision(self):
+        import numpy as np
+        from sync import envelope_log100, cross_correlate_valid, parabolic_peak
+
+        sr = 8000
+        duration = 80.0
+        np.random.seed(42)
+        raw_noise = np.random.randn(int(sr * duration))
+        mod = np.convolve(raw_noise, np.ones(600) / 600, mode="same")
+        signal = (mod * 20000).astype(np.int16)
+
+        ref_env = envelope_log100(signal, sr=sr)
+        cand_start = 28.45
+        cand_pcm = signal[int(cand_start * sr) : int((cand_start + 15.0) * sr)]
+        cand_env = envelope_log100(cand_pcm, sr=sr)
+
+        corr = cross_correlate_valid(ref_env, cand_env)
+        pk = int(np.argmax(corr))
+        pk_time, pk_corr = parabolic_peak(corr, pk)
+
+        diff_ms = abs(pk_time - cand_start) * 1000
+        self.assertLess(diff_ms, 15.0)
+        self.assertGreater(pk_corr, 0.95)
+
 
 if __name__ == "__main__":
     unittest.main()

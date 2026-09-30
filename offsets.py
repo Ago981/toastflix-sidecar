@@ -48,6 +48,13 @@ class OffsetStore:
             f"v2|{media_key}|{resolution}|{video_fp}|{audio_fp}".encode()
         ).hexdigest()
 
+    def _local_delete(self, media_key: str):
+        with self._connect() as conn:
+            conn.execute('DELETE FROM offsets WHERE media_key = ?', (media_key,))
+
+    async def invalidate(self, media_key: str):
+        await asyncio.to_thread(self._local_delete, media_key)
+
     def _local_get(self, cache_key: str):
         with self._connect() as conn:
             columns = [item[1] for item in conn.execute("PRAGMA table_info(offsets)")]
@@ -78,9 +85,21 @@ class OffsetStore:
                         return data["offset"]
             except Exception:
                 pass
-        return await asyncio.to_thread(self._local_get, payload["cache_key"])
+        cache_key = payload.get("cache_key") or self.key(
+            str(payload.get("media_key") or ""),
+            int(payload.get("resolution") or 0),
+            str(payload.get("video_fingerprint") or ""),
+            str(payload.get("audio_fingerprint") or ""),
+        )
+        return await asyncio.to_thread(self._local_get, cache_key)
 
     def _local_put(self, payload: dict, result: dict):
+        cache_key = payload.get("cache_key") or self.key(
+            str(payload.get("media_key") or ""),
+            int(payload.get("resolution") or 0),
+            str(payload.get("video_fingerprint") or ""),
+            str(payload.get("audio_fingerprint") or ""),
+        )
         with self._connect() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO offsets
@@ -88,8 +107,8 @@ class OffsetStore:
                  offset_seconds, rate, confidence, status, details, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    payload["cache_key"], payload["media_key"], payload["resolution"],
-                    payload["video_fingerprint"], payload["audio_fingerprint"],
+                    cache_key, payload.get("media_key") or "", int(payload.get("resolution") or 0),
+                    payload.get("video_fingerprint") or "", payload.get("audio_fingerprint") or "",
                     result.get("offset"), result.get("rate", 1.0),
                     result.get("confidence", 0.0), result.get("status", "incompatible"),
                     json.dumps(result, separators=(",", ":")), time.time(),
