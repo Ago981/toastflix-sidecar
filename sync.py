@@ -1,6 +1,7 @@
 import asyncio
 import math
 import os
+import random
 import re
 import shutil
 import statistics
@@ -189,10 +190,15 @@ class SyncEngine:
         if not valid_public_url(url) or not await resolves_publicly(url):
             raise ValueError("media URL is not public HTTPS")
         kwargs = {"timeout": 30, "follow_redirects": False}
+        raw_tor = os.getenv("TOR_PROXY_URLS", "socks5://tor-toast-1:9050,socks5://tor-toast-2:9050,socks5://tor-proxy:9050")
+        tor_proxies = [p.strip().replace("socks5h://", "socks5://") for p in raw_tor.split(",") if p.strip()]
+
         if is_partite_url(url, headers):
             proxy = self.proxy or os.getenv("SIDECAR_AUDIO_PROXY", "").strip()
             if proxy:
                 kwargs["proxy"] = proxy
+        elif any(v in str(url).lower() for v in ("vixsrc", "vidsrc")) and tor_proxies:
+            kwargs["proxy"] = random.choice(tor_proxies)
 
         last_exc = None
         for attempt in range(2):
@@ -207,9 +213,27 @@ class SyncEngine:
                 if response.status_code in (500, 502, 503, 504, 520, 521, 522, 524) and attempt == 0:
                     await asyncio.sleep(0.5)
                     continue
+                if response.status_code == 403 and tor_proxies and kwargs.get("proxy") not in tor_proxies:
+                    for tor_p in tor_proxies:
+                        try:
+                            async with httpx.AsyncClient(proxy=tor_p, timeout=20, follow_redirects=False) as t_client:
+                                r_tor = await t_client.get(url, headers=headers)
+                                if r_tor.status_code == 200:
+                                    return r_tor
+                        except Exception:
+                            pass
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 403 and tor_proxies and kwargs.get("proxy") not in tor_proxies:
+                    for tor_p in tor_proxies:
+                        try:
+                            async with httpx.AsyncClient(proxy=tor_p, timeout=20, follow_redirects=False) as t_client:
+                                r_tor = await t_client.get(url, headers=headers)
+                                if r_tor.status_code == 200:
+                                    return r_tor
+                        except Exception:
+                            pass
                 last_exc = RuntimeError(f"audio segment fetch failed: HTTP {exc.response.status_code}")
                 if exc.response.status_code in (500, 502, 503, 504, 520, 521, 522, 524) and attempt == 0:
                     await asyncio.sleep(0.5)
