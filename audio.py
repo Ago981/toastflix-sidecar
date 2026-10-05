@@ -303,16 +303,14 @@ class AudioStore:
     async def _download(self, url: str, headers: dict):
         if not valid_public_url(url):
             raise ValueError("audio URL is not public HTTPS")
-        kwargs = {"timeout": 30, "follow_redirects": True}
-        raw_tor = os.getenv("TOR_PROXY_URLS", "socks5://tor-toast-1:9050,socks5://tor-toast-2:9050,socks5://tor-proxy:9050")
+        kwargs = {"timeout": 30, "follow_redirects": True, "verify": False}
+        raw_tor = os.getenv("TOR_PROXY_URLS", "").strip()
         tor_proxies = [p.strip().replace("socks5h://", "socks5://") for p in raw_tor.split(",") if p.strip()]
 
         if is_partite_url(url, headers):
             proxy = self.proxy or os.getenv("SIDECAR_AUDIO_PROXY", "").strip()
             if proxy:
                 kwargs["proxy"] = proxy
-        elif any(v in str(url).lower() for v in ("vixsrc", "vidsrc")) and tor_proxies:
-            kwargs["proxy"] = random.choice(tor_proxies)
 
         try:
             async with httpx.AsyncClient(**kwargs) as client:
@@ -325,7 +323,7 @@ class AudioStore:
             if exc.response.status_code == 403 and tor_proxies and kwargs.get("proxy") not in tor_proxies:
                 for tor_p in tor_proxies:
                     try:
-                        async with httpx.AsyncClient(proxy=tor_p, timeout=20, follow_redirects=True) as t_client:
+                        async with httpx.AsyncClient(proxy=tor_p, timeout=20, follow_redirects=True, verify=False) as t_client:
                             r_tor = await t_client.get(url, headers=headers)
                             if r_tor.status_code == 200:
                                 return r_tor.content
