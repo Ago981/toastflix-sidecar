@@ -15,8 +15,30 @@ import httpx
 import numpy as np
 
 from audio import AudioStore, is_partite_url
+from movy_extractor import MOVY_UA, extract_movy_stream, get_warp_proxy
 from offsets import OffsetStore
 from security import resolves_publicly, valid_public_url
+
+MOVY_DOMAINS = ("goldenkite", "vividstone", "movy", "vidfast", "wecollege")
+
+
+def is_movy_request(url: str, headers: dict | None = None) -> bool:
+    """Detect Goldenkite/Vividstone/Movy/Vidfast/Wecollege requests."""
+    if not url:
+        return False
+    u_lower = str(url).lower()
+    for domain in MOVY_DOMAINS:
+        if domain in u_lower:
+            return True
+    if headers:
+        for k, v in headers.items():
+            if str(k).lower() in ("referer", "origin"):
+                v_lower = str(v).lower()
+                for domain in MOVY_DOMAINS:
+                    if domain in v_lower:
+                        return True
+    return False
+
 
 
 # Speed hypotheses to evaluate (resampling factors)
@@ -180,6 +202,8 @@ class SyncEngine:
     SYNC_MAX_DEVIATION = 0.080  # 80ms strict tolerance for fastpass-v2
     SYNC_FALLBACK_MAX_DEVIATION = 0.250
 
+    _is_movy_request = staticmethod(is_movy_request)
+
     def __init__(self, audio: AudioStore, offsets: OffsetStore, proxy: str = ""):
         self.audio = audio
         self.offsets = offsets
@@ -193,7 +217,22 @@ class SyncEngine:
         raw_tor = os.getenv("TOR_PROXY_URLS", "").strip()
         tor_proxies = [p.strip().replace("socks5h://", "socks5://") for p in raw_tor.split(",") if p.strip()]
 
-        if is_partite_url(url, headers):
+        headers = dict(headers or {})
+        is_movy = self._is_movy_request(url, headers)
+        is_goldenkite = "goldenkite" in url.lower() or "vividstone" in url.lower() or is_movy
+
+        if is_movy:
+            warp_proxy = os.getenv("SIDECAR_WARP_PROXY", "").strip() or get_warp_proxy()
+            if warp_proxy:
+                kwargs["proxy"] = warp_proxy
+            ref = "https://vidfast.vc/" if "vidfast" in url.lower() else "https://www.movy.sx/"
+            if not headers.get("Referer") or ("movy" in ref and "movy" not in headers.get("Referer", "")):
+                headers["Referer"] = ref
+            if "Origin" not in headers:
+                headers["Origin"] = ref.rstrip("/")
+            if not headers.get("User-Agent") or "python" in headers.get("User-Agent", "").lower() or "curl" in headers.get("User-Agent", "").lower():
+                headers["User-Agent"] = MOVY_UA
+        elif is_partite_url(url, headers):
             proxy = self.proxy or os.getenv("SIDECAR_AUDIO_PROXY", "").strip()
             if proxy:
                 kwargs["proxy"] = proxy
@@ -211,7 +250,7 @@ class SyncEngine:
                 if response.status_code in (500, 502, 503, 504, 520, 521, 522, 524) and attempt == 0:
                     await asyncio.sleep(0.5)
                     continue
-                if response.status_code == 403 and tor_proxies and kwargs.get("proxy") not in tor_proxies:
+                if response.status_code == 403 and not is_goldenkite and tor_proxies and kwargs.get("proxy") not in tor_proxies:
                     for tor_p in tor_proxies:
                         try:
                             async with httpx.AsyncClient(proxy=tor_p, timeout=20, follow_redirects=False, verify=False) as t_client:
@@ -223,7 +262,7 @@ class SyncEngine:
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 403 and tor_proxies and kwargs.get("proxy") not in tor_proxies:
+                if exc.response.status_code == 403 and not is_goldenkite and tor_proxies and kwargs.get("proxy") not in tor_proxies:
                     for tor_p in tor_proxies:
                         try:
                             async with httpx.AsyncClient(proxy=tor_p, timeout=20, follow_redirects=False, verify=False) as t_client:
@@ -702,11 +741,43 @@ class SyncEngine:
         print(f"[sidecar background sync] Background sync finished with insufficient concordance ({len(valid_pts)} valid points).")
 
     async def measure(self, payload: dict):
-        media_key = str(payload.get("media_key") or "")
+        media_key = str(payload.get("media_key") or payload.get("mediaKey") or "")
         resolution = int(payload.get("resolution") or 0)
         provider = str(payload.get("provider") or "").strip().lower()
         video_url = str(payload.get("video_url") or "")
         video_headers = payload.get("video_headers") if isinstance(payload.get("video_headers"), dict) else {}
+        server = str(payload.get("server") or "").strip()
+
+        # Autonomous stream refresh via Movy extractor to bypass IP-locked tokens
+        is_movy_provider = any(
+            provider == p or provider.startswith(f"{p}_") or provider.startswith(f"{p}-")
+            for p in ("movy", "vidfast", "vidcore", "vidup")
+        ) or any(p in provider for p in ("movy", "vidfast", "vidcore", "vidup"))
+        is_goldenkite_url = "goldenkite" in video_url.lower() or "vividstone" in video_url.lower()
+
+        if (is_movy_provider or is_goldenkite_url) and media_key:
+            try:
+                fresh_sources = await extract_movy_stream(media_key, preferred_server=server or payload.get("server"))
+                if fresh_sources:
+                    matching = [s for s in fresh_sources if s.get("resolution") == resolution]
+                    chosen = matching[0] if matching else fresh_sources[0]
+                    video_url = chosen["url"]
+                    video_headers = chosen.get("headers") or {
+                        "User-Agent": MOVY_UA,
+                        "Referer": "https://www.movy.sx/",
+                        "Origin": "https://www.movy.sx",
+                    }
+                    payload["video_url"] = video_url
+                    payload["video_headers"] = video_headers
+                    if chosen.get("resolution") and not resolution:
+                        resolution = chosen["resolution"]
+                        payload["resolution"] = resolution
+                    if chosen.get("server"):
+                        payload["server"] = chosen["server"]
+                    print(f"[sidecar sync] Refreshed Movy/Vidfast stream via WARP for {media_key}: {video_url[:60]}... ({resolution}p)")
+            except Exception as e:
+                print(f"[sidecar sync] Warning refreshing Movy stream for {media_key}: {e}")
+
         reference_audio_url = str(
             payload.get("reference_audio_url") or payload.get("referenceAudio") or ""
         ).strip()

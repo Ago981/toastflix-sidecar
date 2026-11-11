@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from audio import AudioStore, parse_cuts_param
+from movy_extractor import get_warp_proxy, is_warp_active
 from offsets import OffsetStore
 from security import SessionManager, request_token, resolves_publicly
 from sync import SyncEngine
@@ -283,7 +284,10 @@ LANDING_HTML = """<!DOCTYPE html>
                     <div class="brand-subtitle">Audio Remux & Sync Microservice</div>
                 </div>
             </div>
-            <div class="badge-status">Online</div>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span id="warpBadge" style="display:inline-flex; align-items:center; gap:6px; background:#27272a; color:#a1a1aa; border:1px solid #3f3f46; border-radius:999px; padding:4px 12px; font-size:0.76rem; font-weight:700;">🛡️ Rilevamento...</span>
+                <div class="badge-status">Online</div>
+            </div>
         </div>
 
         <div class="media-box">
@@ -350,6 +354,26 @@ LANDING_HTML = """<!DOCTYPE html>
             if (urlSpan) {
                 urlSpan.textContent = effectiveUrl;
             }
+            fetch('/api/warp-status')
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    var wb = document.getElementById('warpBadge');
+                    if (wb) {
+                        if (d.active) {
+                            wb.textContent = '🛡️ WARP Integrato (WireProxy): Attivo';
+                            wb.style.background = 'rgba(34, 197, 94, 0.12)';
+                            wb.style.color = '#4ade80';
+                            wb.style.border = '1px solid rgba(34, 197, 94, 0.3)';
+                        } else {
+                            wb.textContent = '🛡️ Connessione Diretta';
+                            wb.style.background = 'rgba(148, 148, 160, 0.12)';
+                            wb.style.color = '#9494a0';
+                            wb.style.border = '1px solid rgba(148, 148, 160, 0.3)';
+                        }
+                    }
+                })
+                .catch(function() {});
+
             fetch('/api/test-providers?quick=1')
                 .then(function(r) { return r.json(); })
                 .then(function(d) {
@@ -399,16 +423,41 @@ LANDING_HTML = """<!DOCTYPE html>
                     btn.textContent = '🔍 Verifica di nuovo';
                     resBox.style.display = 'block';
                     if (badge) {
-                        var hasWarp = data.proxy && data.proxy.indexOf('socks') !== -1;
+                        var hasWarp = data.warp_active || (data.proxy && data.proxy.indexOf('socks') !== -1);
                         badge.textContent = hasWarp ? 'WARP Fonte 2: Attivo' : 'WARP Fonte 2: Non attivo (Diretto)';
                         badge.style.color = hasWarp ? '#4ade80' : '#a1a1aa';
                     }
+                    var warpActive = !!data.warp_active;
+                    var wb = document.getElementById('warpBadge');
+                    if (wb) {
+                        if (warpActive) {
+                            wb.textContent = '🛡️ WARP Integrato (WireProxy): Attivo';
+                            wb.style.background = 'rgba(34, 197, 94, 0.12)';
+                            wb.style.color = '#4ade80';
+                            wb.style.border = '1px solid rgba(34, 197, 94, 0.3)';
+                        } else {
+                            wb.textContent = '🛡️ Connessione Diretta';
+                            wb.style.background = 'rgba(148, 148, 160, 0.12)';
+                            wb.style.color = '#9494a0';
+                            wb.style.border = '1px solid rgba(148, 148, 160, 0.3)';
+                        }
+                    }
+
                     var f1 = data.fonte1 || {};
                     var f2 = data.fonte2 || {};
                     var f1Ok = f1.status === 'ok';
                     var f2Ok = f2.status === 'ok';
 
                     var html = '<div style="display:flex; flex-direction:column; gap:10px;">';
+
+                    // WARP / Network Mode Card
+                    html += '<div style="padding:10px 12px; border-radius:8px; background:' + (warpActive ? 'rgba(34, 197, 94, 0.12)' : 'rgba(148, 148, 160, 0.08)') + '; border:1px solid ' + (warpActive ? '#22c55e' : '#3f3f46') + '; color:' + (warpActive ? '#4ade80' : '#9494a0') + ';">';
+                    html += '<div style="display:flex; justify-content:space-between; align-items:center;">';
+                    html += '<strong>' + (warpActive ? '🛡️ WARP Integrato (WireProxy): Attivo' : '🛡️ Connessione Diretta') + '</strong>';
+                    html += '<span style="font-size:0.75rem; padding:1px 6px; border-radius:4px; background:#18181b; color:' + (warpActive ? '#4ade80' : '#a1a1aa') + ';">' + (warpActive ? (data.warp_proxy || '127.0.0.1:1080') : 'Diretto') + '</span>';
+                    html += '</div>';
+                    html += '<div style="margin-top:4px; font-size:0.82rem; color:' + (warpActive ? '#bbf7d0' : '#d1d1db') + ';">' + (warpActive ? 'WARP WireProxy è attivo: bypass IP attivo per flussi Movy/Vidfast (Goldenkite) e Fonte 2.' : 'Nessun proxy WARP rilevato: traffico instradato tramite connessione diretta.') + '</div>';
+                    html += '</div>';
 
                     // Fonte 1
                     html += '<div style="padding:10px 12px; border-radius:8px; background:' + (f1Ok ? 'rgba(34, 197, 94, 0.12)' : 'rgba(239, 68, 68, 0.12)') + '; border:1px solid ' + (f1Ok ? '#22c55e' : '#ef4444') + '; color:' + (f1Ok ? '#4ade80' : '#f87171') + ';">';
@@ -462,14 +511,30 @@ async def health():
     return {"status": "ok", "service": "toast-audio-sidecar", "public_url": PUBLIC_BASE_URL or None}
 
 
+@app.get("/api/warp-status")
+async def warp_status():
+    proxy = get_warp_proxy()
+    active = proxy is not None
+    return {
+        "status": "ok" if active else "direct",
+        "active": active,
+        "proxy": proxy,
+        "mode": "wireproxy" if active and "127.0.0.1:1080" in (proxy or "") else ("proxy" if active else "direct"),
+        "badge": "🛡️ WARP Integrato (WireProxy): Attivo" if active else "Connessione Diretta",
+    }
+
+
 @app.get("/api/test-providers")
 @app.get("/api/test-partite")
 async def test_providers(quick: int = 0):
-    proxy = AUDIO_PROXY or os.getenv("SIDECAR_AUDIO_PROXY", "").strip()
+    warp_proxy = get_warp_proxy()
+    warp_active = warp_proxy is not None
+    proxy = warp_proxy or AUDIO_PROXY or os.getenv("SIDECAR_AUDIO_PROXY", "").strip()
     if quick:
         return {
             "proxy": proxy if proxy else "Diretto (nessun proxy)",
-            "warp_active": bool(proxy)
+            "warp_active": warp_active,
+            "warp_proxy": warp_proxy,
         }
 
     # --- Fonte 1 (SEMPRE DIRETTO, mai attraverso WARP o altri proxy) ---
@@ -553,6 +618,8 @@ async def test_providers(quick: int = 0):
     return {
         "status": overall_status,
         "proxy": proxy if proxy else "Diretto (nessun proxy)",
+        "warp_active": warp_active,
+        "warp_proxy": warp_proxy,
         "fonte1": fonte1,
         "fonte2": fonte2,
     }
