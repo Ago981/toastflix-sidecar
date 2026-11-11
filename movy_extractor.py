@@ -47,12 +47,18 @@ def get_warp_proxy() -> str | None:
     or local wireproxy on 127.0.0.1:1080.
     Falls back to None (direct connection) if no proxy is listening.
     """
+    enable_warp = os.getenv("ENABLE_WARP", "true").strip().lower()
+    explicit_disabled = enable_warp in ("false", "0", "no", "off", "disable", "disabled")
+
     for env_name in ("SIDECAR_WARP_PROXY", "AUTOSYNC_WARP_PROXY", "SIDECAR_AUDIO_PROXY"):
         env_val = os.getenv(env_name, "").strip()
         if env_val:
             val_clean = env_val.replace("socks5h://", "socks5://")
             if is_proxy_alive(val_clean):
                 return val_clean
+
+    if explicit_disabled:
+        return None
 
     # Check local wireproxy or known container ports
     candidates = [

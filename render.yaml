@@ -5,3 +5,6 @@ services:
     plan: free
     image:
       url: ghcr.io/qwertyuiop8899/toastflix-sidecar:latest
+    envVars:
+      - key: ENABLE_WARP
+        value: "false"

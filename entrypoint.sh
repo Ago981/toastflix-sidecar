@@ -78,6 +78,7 @@ start_userspace_warp() {
     done
 
     echo "[WARP] wireproxy SOCKS5 port open but probe failed or timed out."
+    "$WARPCTL" stop >/dev/null 2>&1 || true
     return 1
 }
 
@@ -98,7 +99,12 @@ trap 'forward_signal TERM; exit 0' TERM
 trap 'forward_signal INT; exit 0' INT
 trap cleanup EXIT
 
-# Check if WARP is disabled
+# Check if WARP is disabled or if running in an environment without UDP (like Render)
+if [ -n "${RENDER:-}" ] && [ -z "${ENABLE_WARP:-}" ]; then
+    echo "[WARP] Render environment detected (outbound UDP is blocked on Render). Disabling wireproxy."
+    ENABLE_WARP="false"
+fi
+
 case "$(printf '%s' "${ENABLE_WARP:-true}" | tr '[:upper:]' '[:lower:]')" in
     false|0|no|off|disable|disabled)
         echo "[WARP] ENABLE_WARP is false; skipping userspace WARP wireproxy startup."
@@ -111,10 +117,12 @@ esac
 echo "Starting ToastFlix Sidecar..."
 cd /app || exit 1
 
+APP_PORT="${PORT:-3107}"
+
 if [ $# -gt 0 ]; then
     "$@" &
 else
-    uvicorn app:app --host 0.0.0.0 --port 3107 &
+    uvicorn app:app --host 0.0.0.0 --port "$APP_PORT" &
 fi
 APP_PID=$!
 
