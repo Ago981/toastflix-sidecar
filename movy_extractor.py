@@ -57,7 +57,9 @@ def get_warp_proxy() -> str | None:
     # Check local wireproxy or known container ports
     candidates = [
         ("127.0.0.1", 1080),
+        ("warp", 1080),
         ("172.17.0.1", 1080),
+        ("172.20.0.1", 1080),
         ("172.20.0.2", 1080),
     ]
     for host, port in candidates:
